@@ -2,4 +2,6 @@ drake/
 
 Drake_Tutorials/
 
+underactuated/
+
 drake_project.code-workspace
