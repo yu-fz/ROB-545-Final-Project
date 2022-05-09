@@ -1,0 +1,154 @@
+<?xml version="1.0"?>
+
+<robot name = "2D_Hopper">
+
+  <material name = "green">
+    <color rgba = "0 0.5 0 1"/>
+  </material>
+
+  <material name = "red">
+    <color rgba = "0.5 0 0 1"/>
+  </material>
+
+  <material name = "black">
+    <color rgba = "0 0 0 1"/>
+  </material>
+
+  <material name = "blue">
+    <color rgba = "0 0 1 1"/>
+  </material>
+
+  <link name="leg">
+
+    <inertial>
+      <origin xyz="0 0 0.5"/>
+      <mass value= "1" />
+      <inertia iyy="1" ixx="1" izz="1" ixy="0" iyz="0" ixz="0"/>
+
+    </inertial>
+
+    <visual>
+      <origin xyz= "0 0 0.5"/>
+      <geometry>
+        <box size = "0.1 0.2 1.1"/>
+      </geometry>
+    </visual>
+    <visual>
+      <origin xyz= "0 0 1.1"/>
+      <geometry>
+        <box size = "0.4 0.2 .1"/>
+      </geometry>
+    </visual>
+
+    <collision>
+      <origin xyz = "0 0 0.05"/>
+      <geometry>
+        <cylinder radius = "0.05" length = ".2"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name = "body">
+
+    <inertial>
+      <origin xyz="0 0 0.7"/>
+      <mass value= "10"/>
+      <inertia iyy="10" ixx="5" izz="5" ixy="0" iyz="0" ixz="0"/>
+    </inertial>
+
+    <visual>
+      <origin xyz= "0 0 0.7"/>
+      <geometry>
+        <box size = "0.6 0.2 0.6"/>
+      </geometry>
+      <material name ="blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.2"/>
+      <geometry>
+        <box size = "0.05 0.2 0.4"/>
+      </geometry>
+      <material name ="blue"/>
+    </visual>
+  </link>
+
+  <link name ="slide">
+    <visual>
+      <geometry>
+        <box size ="0.1 0.2 0.1"/>
+      </geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+
+  <link name = "ground">
+    <visual>
+      <origin xyz="0 0 -1"/>
+      <geometry>
+        <box size = "100 1 2"/>
+      </geometry>
+      <material name="green"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -1"/>
+      <geometry>
+        <box size = "100 1 2"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name = "leg_x"/>
+  <link name = "leg_y"/>
+
+
+  <joint name ="ground_is_world" type="fixed">
+    <parent link ="world"/>
+    <child link = "ground"/>
+    <origin xyz = "0 0 0"/>
+  </joint>
+  <joint name = "legx" type="prismatic">
+    <parent link = "ground"/>
+    <child link ="leg_x"/>
+    <origin xyz = "0 0 0"/>
+    <axis xyz="1 0 0"/>
+  </joint>
+  <joint name = "legy" type="prismatic">
+    <parent link = "leg_x"/>
+    <child link ="leg_y"/>
+    <axis xyz="0 0 1"/>
+    <origin xyz = "0 0 0"/>
+    <limit lower="0"/>
+  </joint>
+  <joint name = "legtheta" type="continuous">
+    <parent link = "leg_y"/>
+    <child link ="leg"/>
+    <origin xyz = "0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <joint name = "hip" type="continuous">
+    <parent link="slide"/>
+    <child link="body"/>
+    <axis xyz="0 1 0"/>
+    <origin xyz="0 0 0"/>
+  </joint>
+
+  <joint name = "z0" type="prismatic">
+    <parent link="leg"/>
+    <child link = "slide"/>
+    <axis xyz = "0 0 1"/>
+    <origin xyz="0 0 1"/>
+    <limit lower="-0.8" upper="0"/>
+  </joint>
+
+  <transmission type = "SimpleTransmission" name = "spring">
+    <actuator name = "spring"/>
+    <joint name = "z0"/>
+  </transmission>
+
+  <transmission type="SimpleTransmission" name="torque_trans">
+    <actuator name= "uT"/>
+    <joint name = "hip"/>
+  </transmission>
+
+</robot>

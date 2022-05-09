@@ -1,0 +1,62 @@
+# -*- mode: python -*-
+# vi: set ft=python :
+
+# Copyright 2020 Massachusetts Institute of Technology.
+# Licensed under the BSD 3-Clause License. See LICENSE.TXT for details.
+
+load("//htmlbook/tools/python:defs.bzl", "rt_py_library")
+
+rt_py_library(
+    name = "underactuated",
+    srcs = [
+        "__init__.py",
+        "jupyter.py",
+        "meshcat_utils.py",
+        "multibody.py",
+        "plot_utils.py",
+        "pyplot_visualizer.py",
+        "scenarios.py",
+        "utils.py",
+    ],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
+rt_py_library(
+    name = "double_integrator",
+    srcs = ["double_integrator.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = ["underactuated"],
+)
+
+rt_py_library(
+    name = "meshcat_cpp_utils",
+    srcs = ["meshcat_cpp_utils.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = ["underactuated"],
+)
+
+rt_py_library(
+    name = "optimizers",
+    srcs = ["optimizers.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+)
+
+rt_py_library(
+    name = "pendulum",
+    srcs = ["pendulum.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = ["underactuated"],
+)
+
+rt_py_library(
+    name = "quadrotor2d",
+    srcs = ["quadrotor2d.py"],
+    imports = [".."],
+    visibility = ["//visibility:public"],
+    deps = ["underactuated"],
+)
