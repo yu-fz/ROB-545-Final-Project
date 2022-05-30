@@ -20,10 +20,10 @@ class SLIP_Model():
         self.max_leg_torq = 1000
 
         self.min_spring_const = 4000
-        self.max_spring_const = 100000
+        self.max_spring_const = 500000
 
-        self.min_leg_angle = -np.pi/4
-        self.max_leg_angle = np.pi/4
+        self.min_leg_angle = -np.pi/2
+        self.max_leg_angle = np.pi/2
 
         self.collocation_nodes_per_contact = 50
 
@@ -80,8 +80,8 @@ class SLIP_Model():
         #b = g*m*c1 - k*(l0 - l) + m*l*theta_d**2 - m*l_dd 
         #b = m * g * c1 * l + k*(l0 - l) + 0.5 * m * l * theta_d**2
         #b = 0.5 * 
-        a = m * l_dd - m * l * theta_d**2 + m * g * c1 - u[1] * (l0 - l) 
-        b = (m * l**2 * theta_dd + 2 * m * l * l_d * theta_d - m * g * l * s1) - u[0]
+        a = m * l_dd - m * l * theta_d**2 + m * g * c1 - u[0] * (l0 - l) 
+        b = (m * l**2 * theta_dd + 2 * m * l * l_d * theta_d - m * g * l * s1)
         return [a,b]
     
     def kinematic_feasibility(self, vars):
@@ -101,6 +101,7 @@ class SLIP_Model():
         u=vars[12:]
         
         x_d = qdot[0]
+        z_d = qdot[1]
         
         l = q[2]
         l_d = qdot[2]
@@ -108,13 +109,25 @@ class SLIP_Model():
         theta = q[3]
         theta_d = qdot[3]
         foot_x_pos = q[0] + np.sin(theta) * l
-        a = x_d - np.sin(theta) * l_d - np.cos(theta) * theta_d * l
+        a = x_d + np.sin(theta) * l_d + np.cos(theta) * theta_d * l
+        b = z_d - np.cos(theta) * l_d - np.sin(theta) * theta_d * l
         #a = x_d + np.sin(theta)*l_d/2 * theta_d*np.cos(theta)*l/2
         #a = 0
-        b = 0
+        #b = np.sqrt(np.sum(q[:2] - [foot_x_pos, q[1] + np.cos(theta) * l])**2)
+        #b = 0
         
         return [a,b]
         
+    def angle_matches_velocity(self, var):
+        q = var[:4]
+        qd = var[4:]
+        angle = q[3]
+        if qd[0] != 0.0 and qd[1] != 0.0:
+            vel_angle = np.arctan2(qd[0], qd[1])
+        else:
+            vel_angle = 0
+        return [angle - vel_angle]
+
     def swing_feasibility(self, qddot):
         """
         Checks if the given swing/flight states are dynamically feasible
@@ -171,6 +184,15 @@ class SLIP_Model():
 
         return [x_double_dot,z_double_dot]
 
+
+    def energy(self, q, qd, u):
+        #k = 0.5 * u[1] * (q[2] - self.l_rest)**2
+        #v = self.m/2 * (qd[0] ** 2 + qd[1] ** 2)
+        #p = self.m * self.g * q[1]
+        T = self.m/2 * (qd[2] ** 2 + q[2] * qd[3]**2)
+        U = self.m * self.g * q[2] * np.cos(q[3]) + u/2 * (self.l_rest - q[2])**2
+        return T + U
+
     def create_contact_schedule(self, trajectory_length):
         """
         Given a trajectory length in # of collocation points, find the
@@ -218,7 +240,7 @@ class SLIP_Model():
         fig, ax = plt.subplots()
         import matplotlib.animation as animation
 
-        ax.axis([-0.2,5,0,3.5])
+        ax.axis([-5,5,0,5])
         
         base, = ax.plot(0, 1, marker="o")
         foot, = ax.plot(0, 1, marker="o")
@@ -235,14 +257,14 @@ class SLIP_Model():
             foot.set_data([foot_x], [foot_z])
             line.set_data([x, foot_x], [z, foot_z])
             #ax.set_xlim(x-1, x+1) #added ax attribute here
-            #ax.set_ylim(-0.1, 3) #added ax attribute here
+            #ax.set_ylim(0, 3) #added ax attribute here
 
             return base,foot,line
 
         ani = animation.FuncAnimation(fig, update, interval=100, blit=True, repeat=True,
                             frames=np.linspace(0, len(q), num=len(q), endpoint=False))
-        #writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='Me'), bitrate=1800)
-        #ani.save('traj.mp4', writer=writer)
+        writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='Me'), bitrate=1800)
+        ani.save('traj.mp4', writer=writer)
         plt.show()
 
 def add_linear_constraint(program, constraint, description):
@@ -252,47 +274,54 @@ def add_nonlinear_constraint(program, constraint, description):
     program.AddConstraint(constraint).evaluator().set_description(description)
 
 def add_bounding_box_constraint(program, variable, min_val, max_val, num_points, description):
-    program.AddBoundingBoxConstraint([min_val] * num_points, 
-                                     [max_val] * num_points,
-                                     variable,
-                                     ).evaluator().set_description(description)
+    if num_points > 1:
+        program.AddBoundingBoxConstraint([min_val] * num_points, 
+                                         [max_val] * num_points,
+                                         variable,
+                                         ).evaluator().set_description(description)
+    else:
+        program.AddBoundingBoxConstraint(min_val, 
+                                         max_val,
+                                         variable,
+                                         ).evaluator().set_description(description)
 
-def create_trajectory(num_phases: int = 4):
+def create_swing_trajectory(slip_model, q_i = None, qd_i = None, q_f = None, qd_f = None):
     prog = MathematicalProgram()
-    slip_model = SLIP_Model()
-    number_of_collocation_points = num_phases * slip_model.collocation_nodes_per_contact 
+    #slip_model = SLIP_Model()
+    number_of_collocation_points = slip_model.collocation_nodes_per_contact 
 
-    q_initial_state = np.array([0, slip_model.l_rest, slip_model.l_rest, 0])
-    q_dot_initial_state = np.array([0, 2, 0, 0])
-
-    #q_final_state = np.array([2, 2, slip_model.l_rest, 0])
-    #q_dot_final_state = np.array([0, 0, 0, 0])
-
-    # Constraints for max/min timestep lengths in swing and stance
-    dt_max = 0.02
-    dt_min = 0.002
+    dt_max = 0.05
+    dt_min = 0.005
 
     min_jump_height = 0.5
 
     # Decide state positions 
-    q = prog.NewContinuousVariables(number_of_collocation_points+1, 4, 'q')
+    q = prog.NewContinuousVariables(number_of_collocation_points, 4, 'q')
 
-    ground_schedule = slip_model.create_contact_schedule(number_of_collocation_points)
+    #assert None in [q_i, q_f] and None in [qd_i, qd_f]
 
     # Initial position constraint
-    add_linear_constraint(prog, q[0,0] == q_initial_state[0], 'x init')
-    add_linear_constraint(prog, q[0,1] == q_initial_state[1], 'z init')
-    add_linear_constraint(prog, q[0,2] == q_initial_state[2], 'l init')
-    add_linear_constraint(prog, q[0,3] == q_initial_state[3], 'theta init')
+    if q_i is not None:
+        assert len(q_i) == 2
+        add_linear_constraint(prog, q[0,0] == q_i[0], 'x init')
+        add_linear_constraint(prog, q[0,1] == q_i[1], 'z init')
+
+    if q_f is not None:
+        assert len(q_f) == 2
+        add_linear_constraint(prog, q[-1,0] == q_f[0], 'x final')
+        add_linear_constraint(prog, q[-1,1] == q_f[1], 'z final')
 
     # Decide state velocities
-    qd = prog.NewContinuousVariables(number_of_collocation_points+1, 4, 'qd')
+    qd = prog.NewContinuousVariables(number_of_collocation_points, 4, 'qd')
 
     # Initial velocity constraint
-    add_linear_constraint(prog, qd[0,0] >= q_dot_initial_state[0], 'xd init')
-    add_linear_constraint(prog, qd[0,1] == q_dot_initial_state[1], 'zd init')
-    add_linear_constraint(prog, qd[0,2] <= q_dot_initial_state[2], 'ld init')
-    add_linear_constraint(prog, qd[0,3] <= q_dot_initial_state[3], 'thetad init')
+    if qd_i is not None:
+        add_linear_constraint(prog, qd[0,0] == qd_i[0], 'xd init')
+        add_linear_constraint(prog, qd[0,1] == qd_i[1], 'zd init')
+
+    if qd_f is not None:
+        add_linear_constraint(prog, qd[-1,0] == qd_f[0], 'xd final')
+        add_linear_constraint(prog, qd[-1,1] == qd_f[1], 'zd final')
 
     # Decide state accelerations
     qdd = prog.NewContinuousVariables(number_of_collocation_points, 4, 'qdd')
@@ -301,170 +330,160 @@ def create_trajectory(num_phases: int = 4):
     add_linear_constraint(prog, qdd[0,2] == 0, 'ldd init')
     add_linear_constraint(prog, qdd[0,3] == 0, 'thetadd init')
 
-    # Decide leg input torques
-    u = prog.NewContinuousVariables(number_of_collocation_points, 2, 'u') 
+    # Actuator leg angle constraint
+    add_bounding_box_constraint(prog, q[:,3], slip_model.min_leg_angle, slip_model.max_leg_angle,
+                                number_of_collocation_points, 'leg angle bounds')
 
-    #Actuator torque bound constraint 
-    add_bounding_box_constraint(prog, u[:,0], slip_model.min_leg_torq, slip_model.max_leg_torq,
-                                number_of_collocation_points, 'torq bounds')
+    dt = prog.NewContinuousVariables(1, 1, "dt")
+
+    # Time step constraints 
+    add_bounding_box_constraint(prog, dt, dt_min, dt_max, 1, 'timestep bound')
+
+    var = np.concatenate((q[0,:],qd[0,:]))
+    prog.AddConstraint(slip_model.angle_matches_velocity, lb=[0], ub=[0], vars=var).evaluator().set_description("angle match")
+
+    var = np.concatenate((q[-1,:], qd[-1,:]))
+    #prog.AddConstraint(slip_model.angle_matches_velocity, lb=[0], ub=[0], vars=var).evaluator().set_description("angle match")
+
+    # Foot must touch ground at end of swing
+    add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[0,:]) == 0, f'grounded foot {0}')
+    add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[-1,:]) == 0, f'grounded foot {-1}')
+
+    for i in range(number_of_collocation_points):
+        #add_nonlinear_constraint(prog, slip_model.energy(q[i,:], qd[i,:], u[phase_num,:]) == slip_model.energy(q[i+1,:], qd[i+1,:], u[i+1,:]), f'energy constraint {i} ')
+
+        # Swing dynamics constraints
+        for f in slip_model.swing_feasibility(qdd[i,:]):
+            add_nonlinear_constraint(prog, f == 0, f'air eqn {i}')
+
+        # Constrain the leg length to be rest length when in swing
+
+        add_linear_constraint(prog, q[i,2] == slip_model.l_rest, f'swing leg length {i}')
+
+        #add_linear_constraint(prog, q[i,1] >= min_jump_height, f'min flight body height {i}')
+        add_linear_constraint(prog, qdd[i,2] == 0, f'no leg dynamics in swing {i}')
+
+        # Euler integration constraint
+        if i < number_of_collocation_points - 1:
+            add_nonlinear_constraint(prog, eq(q[i+1,:], q[i,:] + dt * qd[i+1,:]), f'euler integration flight x vel {i}')
+            add_nonlinear_constraint(prog, eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:]), f'euler integration flight x vel {i}')
+
+            # Foot cannot clip below ground
+            if i > 0:
+                add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]) >= 0, f'foot above ground {i}')
+        
+    solver = SnoptSolver()
+    result = solver.Solve(prog)
+
+    pos = result.GetSolution(q)
+    vel = result.GetSolution(qd)
+    accel = result.GetSolution(qdd)
+    dt = result.GetSolution(dt)
+    print(pos[:,2])
+    print(dt)
+
+    if not result.is_success():
+        for constraint in result.GetInfeasibleConstraintNames(prog)[:4]:
+            print(constraint)
+
+        slip_model.animate(pos)
+        raise RuntimeError("Could not generate trajectory")
+    plt.plot(pos[:-1,0],label = "x distance")
+    plt.plot(pos[:-1,1],label = "z height")
+    plt.plot(pos[:-1,2],label = "leg length")
+    #plt.plot(ts, pos[:-1,3],label = "leg angle")
+    plt.legend()
+    plt.show()
+
+    plt.plot(vel[:,0][:-1],label = "x vel")
+    plt.plot(vel[:,1][:-1],label = "z vel")
+    plt.legend()
+    plt.show()
+    slip_model.animate(pos)
+    return pos, vel, accel, dt
+
+def create_stance_trajectory(slip_model, qd_i = None, exit_angle = None):
+    prog = MathematicalProgram()
+    number_of_collocation_points = slip_model.collocation_nodes_per_contact 
+
+    q_initial_state = np.array([1, slip_model.l_rest, slip_model.l_rest, 0])
+    q_dot_initial_state = np.array([0.5, 2, 0, 0])
+
+    #q_final_state = np.array([2, 2, slip_model.l_rest, 0])
+    #q_dot_final_state = np.array([0, 0, 0, 0])
+
+    # Constraints for max/min timestep lengths in swing and stance
+    dt_max = 0.05
+    dt_min = 0.001
+
+    # Decide state positions 
+    q = prog.NewContinuousVariables(number_of_collocation_points, 4, 'q')
+
+    ground_schedule = slip_model.create_contact_schedule(number_of_collocation_points)
+
+    # Initial position constraint
+    #add_linear_constraint(prog, q[0,0] == q_initial_state[0], 'x init')
+    #add_linear_constraint(prog, q[0,1] == q_initial_state[1], 'z init')
+    #add_linear_constraint(prog, q[0,2] == q_initial_state[2], 'l init')
+    #add_linear_constraint(prog, q[0,3] == q_initial_state[3], 'theta init')
+
+    # Decide state velocities
+    qd = prog.NewContinuousVariables(number_of_collocation_points, 4, 'qd')
+
+    # Initial velocity constraint
+    if qd_i is not None:
+        add_linear_constraint(prog, qd[0,0] == qd_i[0], 'xd init')
+        add_linear_constraint(prog, qd[0,1] == qd_i[1], 'zd init')
+    #add_linear_constraint(prog, qd[0,2] == q_dot_initial_state[2], 'ld init')
+    #add_linear_constraint(prog, qd[0,3] == q_dot_initial_state[3], 'thetad init')
+
+    # Decide state accelerations
+    qdd = prog.NewContinuousVariables(number_of_collocation_points, 4, 'qdd')
+
+    # Initial acceleration constraint
+    add_linear_constraint(prog, qdd[0,2] == 0, 'ldd init')
+    add_linear_constraint(prog, qdd[0,3] == 0, 'thetadd init')
+
+    # Decide leg spring stiffness
+    u = prog.NewContinuousVariables(1, 1, 'u') 
 
     # Actuator spring constant constraint
-    add_bounding_box_constraint(prog, u[:,1], slip_model.min_spring_const, slip_model.max_spring_const,
-                                number_of_collocation_points, 'spring bounds')
+    add_bounding_box_constraint(prog, u[:,0], slip_model.min_spring_const, slip_model.max_spring_const,
+                                1, 'spring bounds')
+
+    dt = prog.NewContinuousVariables(1, 1, "dt")
+
+    # Time step constraints 
+    add_bounding_box_constraint(prog, dt, dt_min, dt_max, 1, 'timestep bound')
 
     # Actuator leg angle constraint
     add_bounding_box_constraint(prog, q[:,3], slip_model.min_leg_angle, slip_model.max_leg_angle,
-                                number_of_collocation_points+1, 'leg angle bounds')
+                                number_of_collocation_points, 'leg angle bounds')
 
-    dts = prog.NewContinuousVariables(num_phases, 1, "dt")
+    for i in range(number_of_collocation_points):
+        #add_nonlinear_constraint(prog, slip_model.energy(q[i,:], qd[i,:], u[phase_num,:]) == slip_model.energy(q[i+1,:], qd[i+1,:], u[i+1,:]), f'energy constraint {i} ')
+        var = np.concatenate((q[i,:], qd[i,:], qdd[i,:], u[0,:]))
 
-    # Time step constraints 
-    add_bounding_box_constraint(prog, dts, dt_min, dt_max, num_phases, 'timestep bound')
+        # Spring constant must stay constant during stance
+        #prog.AddLinearConstraint(u[i,0] == u[i-1,0])
 
-    phase_num = 0
-    for i in range(number_of_collocation_points-1):
-        dt = dts[phase_num]
+        if i < number_of_collocation_points - 1:
+            prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i+1,:])).evaluator().set_description(f'stance full state euler integration pos {i}')
+            prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description(f'stance full state euler integration vel {i}')
 
-        if ground_schedule[i] == 0: # Swing
-            # Swing dynamics constraints
-            for f in slip_model.swing_feasibility(qdd[i,:]):
-                add_nonlinear_constraint(prog, f == 0, f'air eqn {i}')
+            add_linear_constraint(prog, q[i,2] <= slip_model.l_rest, f'stance leg length {i}')
 
-            # Constrain the leg length to be rest length when in swing
+        prog.AddConstraint(slip_model.kinematic_feasibility, lb = [0]*2, ub = [0]*2,vars=var).evaluator().set_description("kinematic eqn")
+        prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
+        prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
 
-            add_linear_constraint(prog, q[i,2] == slip_model.l_rest, f'swing leg length {i}')
+        prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])==0).evaluator().set_description("grounded foot")
+        prog.AddLinearConstraint(q[i,2]>=0.5).evaluator().set_description("min stance height")
+        prog.AddConstraint(slip_model.stance_feasibility, lb=[0]*2,ub=[0]*2,vars=var).evaluator().set_description("stance eqn")
 
-            # Euler integration constraint  
-            add_linear_constraint(prog, q[i,1] >= min_jump_height, f'min flight body height {i}')
-            add_linear_constraint(prog, qdd[i+1,2] == 0, f'no leg dynamics in swing {i}')
+    add_linear_constraint(prog, q[-1,2] == slip_model.l_rest, f'stance leg length {-1}')
+    add_linear_constraint(prog, qd[-1,1] >= 0, 'nonnegative liftoff z velocity')
 
-            # Foot cannot clip below ground
-            add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]) >= 0, f'foot above ground {i}')
-
-            add_nonlinear_constraint(prog, eq(q[i+1, 0], q[i, 0] + dt * qd[i+1, 0]), f'euler integration flight x vel {i}')
-            add_nonlinear_constraint(prog, eq(qd[i+1, 0], qd[i, 0] + dt * qdd[i, 0]), f'euler integration flight x vel {i}')
-            
-            add_nonlinear_constraint(prog, eq(q[i+1, 1], q[i, 1] + dt * qd[i+1, 1]), f'euler integration flight z pos {i}')
-            add_nonlinear_constraint(prog, eq(qd[i+1, 1], qd[i, 1] + dt * qdd[i, 1]), f'euler integration flight z vel {i}')
-
-            # This constraint is needed so that a single flight phase will work
-            if ground_schedule[i+1] == 1 or i == number_of_collocation_points - 2:
-                add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]) == 0, f'grounded foot {i}')
-                phase_num += 1
-        
-        else:
-            var = np.concatenate((q[i,:],qd[i,:],qdd[i,:],u[i,:]))
-
-            # No torque allowed
-            prog.AddLinearConstraint(u[i,0] == 0)
-
-            # Spring constant must stay constant during stance
-            prog.AddLinearConstraint(u[i,1] == u[i-1,1])
-
-            if ground_schedule[i + 1] == 0 or i == number_of_collocation_points - 2:
-                phase_num += 1
-                prog.AddConstraint(eq(q[i+1,0], q[i,0] + dt * qd[i+1,0])).evaluator().set_description('stance euler integration x pos')
-                prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
-                
-                prog.AddConstraint(eq(q[i+1,1], q[i,1] + dt * qd[i+1,1])).evaluator().set_description('stance euler integration x vel')
-                prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
-                #prog.AddLinearConstraint(qdd[i,2]==0).evaluator().set_description('no leg dynamics in swing')
-
-            else:
-
-                prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
-                prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
-
-                #prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i+1,:])).evaluator().set_description('stance full state euler integration pos')
-                #prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description('stance full state euler integration vel')
-
-                prog.AddConstraint(eq(q[i+1,2], q[i,2] + dt * qd[i+1,2])).evaluator().set_description('stance full state euler integration pos')
-                prog.AddConstraint(eq(qd[i+1,2], qd[i,2] + dt * qdd[i,2])).evaluator().set_description('stance full state euler integration vel')
-                
-                prog.AddConstraint(eq(q[i+1,3], q[i,3] + dt * qd[i+1,3])).evaluator().set_description('stance full state euler integration pos')
-                prog.AddConstraint(eq(qd[i+1,3], qd[i,3] + dt * qdd[i,3])).evaluator().set_description('stance full state euler integration vel')
-        
-                prog.AddConstraint(slip_model.kinematic_feasibility, lb =[0]*2,ub=[0]*2,vars=var).evaluator().set_description("kinematic eqn")
-                prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
-                prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
-        
-                prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])==0).evaluator().set_description("grounded foot")
-                prog.AddLinearConstraint(q[i,2]>=0.5).evaluator().set_description("min stance height")
-                prog.AddConstraint(slip_model.stance_feasibility, lb=[0]*2,ub=[0]*2,vars=var).evaluator().set_description("stance eqn")
-    # Contact Sequence Dependent Dynamics Constraints 
-    """
-    for i in range(number_of_collocation_points-1):
-        if ground_schedule[i] == 0: # Swing
-            # Swing dynamics constraints
-            add_nonlinear_constraint(prog, slip_model.swing_feasibility, qdd[i,:], 2, f'air eqn {i}')
-
-            # Constrain the leg length to be rest length when in swing
-
-            add_linear_constraint(prog, q[i,2] == slip_model.l_rest, f'swing leg length {i}')
-
-            # Euler integration constraint  
-            prog.AddLinearConstraint(q[i,1]>=min_jump_height).evaluator().set_description("minimum flight body height")
-            prog.AddLinearConstraint(qdd[i+1,2]==0).evaluator().set_description('no leg dynamics in swing')
-            prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])>=0).evaluator().set_description("foot above ground")
-
-            # prog.AddConstraint(eq(q[i+1,2], q[i,2] + h_swing * qd[i+1,2])).evaluator().set_description('euler integration 1')
-            # prog.AddConstraint(eq(qd[i+1,2], qd[i,2] + h_swing * qdd[i,2])).evaluator().set_description('euler integration 2')
-            #prog.AddLinearConstraint(qdd[i,2]==0).evaluator().set_description('no leg dynamics in swing')
-            # prog.AddLinearConstraint(qdd[i+1,2]==0).evaluator().set_description('no leg dynamics in swing')
-            dt = h_swing
-
-            prog.AddConstraint(eq(q[i+1,0], q[i,0] + dt * qd[i+1,0])).evaluator().set_description('euler integration flight x pos')
-            prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('euler integration flight x vel')
-            
-            prog.AddConstraint(eq(q[i+1,1], q[i,1] + dt*qd[i+1,1])).evaluator().set_description('euler integration flight z pos')
-            prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt*qdd[i,1])).evaluator().set_description('euler integration flight z vel')
-            
-        else:
-            #stance dynamics constraints
-            #ensure the foot is on the ground
-            var = np.concatenate((q[i,:],qd[i,:],qdd[i,:],u[i,:]))
-            #prog.AddConstraint(slip_model.kinematic_feasibility, lb =[0]*2,ub=[0]*2,vars=var).evaluator().set_description("kinematic eqn")
-
-            
-            prog.AddLinearConstraint(u[i,1] == u[i-1,1])
-
-            dt = h_stance
-
-            #euler integration constraint  
-            if ground_schedule[i+1]==0:
-              #next step is swing 
-              #only integrate body x,z positions and vels 
-              prog.AddConstraint(eq(q[i+1,0], q[i,0] + dt * qd[i+1,0])).evaluator().set_description('stance euler integration x pos')
-              prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
-              
-              prog.AddConstraint(eq(q[i+1,1], q[i,1] + dt * qd[i+1,1])).evaluator().set_description('stance euler integration x vel')
-              prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
-              #prog.AddLinearConstraint(qdd[i,2]==0).evaluator().set_description('no leg dynamics in swing')
-
-            else:
-
-              prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
-              prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
-
-
-              #prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i+1,:])).evaluator().set_description('stance full state euler integration pos')
-              #prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description('stance full state euler integration vel')
-
-              prog.AddConstraint(eq(q[i+1,2], q[i,2] + dt * qd[i+1,2])).evaluator().set_description('stance full state euler integration pos')
-              prog.AddConstraint(eq(qd[i+1,2], qd[i,2] + dt * qdd[i,2])).evaluator().set_description('stance full state euler integration vel')
-              
-              prog.AddConstraint(eq(q[i+1,3], q[i,3] + dt * qd[i+1,3])).evaluator().set_description('stance full state euler integration pos')
-              prog.AddConstraint(eq(qd[i+1,3], qd[i,3] + dt * qdd[i,3])).evaluator().set_description('stance full state euler integration vel')
-        
-              prog.AddConstraint(slip_model.kinematic_feasibility, lb =[0]*2,ub=[0]*2,vars=var).evaluator().set_description("kinematic eqn")
-              prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
-              prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
-        
-              prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])==0).evaluator().set_description("grounded foot")
-              prog.AddLinearConstraint(q[i,2]>=0.5).evaluator().set_description("min stance height")
-              prog.AddConstraint(slip_model.stance_feasibility, lb=[0]*2,ub=[0]*2,vars=var).evaluator().set_description("stance eqn")
-        prog.AddCost(dt[0]*u[i].dot(u[i]))
-    """
 
     solver = SnoptSolver()
     result = solver.Solve(prog)
@@ -473,12 +492,59 @@ def create_trajectory(num_phases: int = 4):
     vel = result.GetSolution(qd)
     accel = result.GetSolution(qdd)
     inputs = result.GetSolution(u)
+    dt = result.GetSolution(dt)
+    #energy = np.array([slip_model.energy(pos[i], vel[i], inputs[i]) for i in range(len(pos)-1)])
+    #print(dts)
+    print(dt)
+    print(inputs)
+    #ts = np.cumsum(dts)
 
     if not result.is_success():
-        for constraint in result.GetInfeasibleConstraintNames(prog):
+        for constraint in result.GetInfeasibleConstraintNames(prog)[:4]:
             print(constraint)
 
+        slip_model.animate(pos)
         raise RuntimeError("Could not generate trajectory")
 
+    plt.plot(pos[:-1,0],label = "x distance")
+    plt.plot(pos[:-1,1],label = "z height")
+    plt.plot(pos[:-1,2],label = "leg length")
+    plt.plot(vel[:,0][:-1],label = "x vel")
+    plt.plot(vel[:,1][:-1],label = "z vel")
+    #plt.plot(ts, pos[:-1,3],label = "leg angle")
+    plt.legend()
+    plt.show()
+
+    plt.plot(energy, label = "energy")
+    plt.legend()
+    plt.show()
+
+
+    plt.plot(vel[:,0][:-1],label = "x vel")
+    plt.plot(vel[:,1][:-1],label = "z vel")
+    plt.legend()
+    plt.show()
+    # plt.plot(accel[:,0])
+    # plt.plot(accel[:,1])
+    #plt.plot(accel[:,1])
+
+    #plt.show()
+    #plt.plot(inputs[:,0], label = 'input 0')
+    #plt.plot(inputs[:,1], label = 'input 1')
+    #plt.legend()
+    #plt.show()
     slip_model.animate(pos)
-create_trajectory(2)
+
+if __name__ == '__main__':
+    m = SLIP_Model()
+    takeoff_velocity = 3
+    takeoff_angle = np.pi/2 - 1e-1
+    #q_i = np.array([np.cos(takeoff_angle) * m.l_rest, np.sin(takeoff_angle) * m.l_rest])
+    #qd_i = np.array([np.cos(takeoff_angle) * takeoff_velocity, np.sin(takeoff_angle) * takeoff_velocity])
+    #qd_i = np.array([1, np.sin(takeoff_angle) * takeoff_velocity])
+    if True:
+        qd_i = [2, 4]
+        create_swing_trajectory(m, qd_i=qd_i)
+    else:
+        qd_i = [2, -4]
+        create_stance_trajectory(m, qd_i=qd_i)
