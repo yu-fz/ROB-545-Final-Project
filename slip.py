@@ -263,7 +263,7 @@ def create_trajectory(num_phases: int = 4):
     number_of_collocation_points = num_phases * slip_model.collocation_nodes_per_contact 
 
     q_initial_state = np.array([0, slip_model.l_rest, slip_model.l_rest, 0])
-    q_dot_initial_state = np.array([0, 1, 0, 0])
+    q_dot_initial_state = np.array([0, 2, 0, 0])
 
     #q_final_state = np.array([2, 2, slip_model.l_rest, 0])
     #q_dot_final_state = np.array([0, 0, 0, 0])
@@ -341,22 +341,56 @@ def create_trajectory(num_phases: int = 4):
             # Foot cannot clip below ground
             add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]) >= 0, f'foot above ground {i}')
 
-            prog.AddConstraint(eq(q[i+1,0], q[i,0] + dt * qd[i+1,0])).evaluator().set_description('euler integration flight x pos')
-            prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('euler integration flight x vel')
+            add_nonlinear_constraint(prog, eq(q[i+1, 0], q[i, 0] + dt * qd[i+1, 0]), f'euler integration flight x vel {i}')
+            add_nonlinear_constraint(prog, eq(qd[i+1, 0], qd[i, 0] + dt * qdd[i, 0]), f'euler integration flight x vel {i}')
             
-            prog.AddConstraint(eq(q[i+1,1], q[i,1] + dt*qd[i+1,1])).evaluator().set_description('euler integration flight z pos')
-            prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt*qdd[i,1])).evaluator().set_description('euler integration flight z vel')
+            add_nonlinear_constraint(prog, eq(q[i+1, 1], q[i, 1] + dt * qd[i+1, 1]), f'euler integration flight z pos {i}')
+            add_nonlinear_constraint(prog, eq(qd[i+1, 1], qd[i, 1] + dt * qdd[i, 1]), f'euler integration flight z vel {i}')
 
-            # This is so that a single flight phase will work
-            if ground_schedule[i] == 1 or i == number_of_collocation_points - 2:
-                #add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]), None, 1, 'grounded foot')
-                #prog.AddConstraint().evaluator().set_description("grounded foot")
-                add_nonlinear_constraint
-                prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])==0).evaluator().set_description("grounded foot")
-                pass
+            # This constraint is needed so that a single flight phase will work
+            if ground_schedule[i+1] == 1 or i == number_of_collocation_points - 2:
+                add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[i,:]) == 0, f'grounded foot {i}')
+                phase_num += 1
         
         else:
-            raise RuntimeError
+            var = np.concatenate((q[i,:],qd[i,:],qdd[i,:],u[i,:]))
+
+            # No torque allowed
+            prog.AddLinearConstraint(u[i,0] == 0)
+
+            # Spring constant must stay constant during stance
+            prog.AddLinearConstraint(u[i,1] == u[i-1,1])
+
+            if ground_schedule[i + 1] == 0 or i == number_of_collocation_points - 2:
+                phase_num += 1
+                prog.AddConstraint(eq(q[i+1,0], q[i,0] + dt * qd[i+1,0])).evaluator().set_description('stance euler integration x pos')
+                prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
+                
+                prog.AddConstraint(eq(q[i+1,1], q[i,1] + dt * qd[i+1,1])).evaluator().set_description('stance euler integration x vel')
+                prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
+                #prog.AddLinearConstraint(qdd[i,2]==0).evaluator().set_description('no leg dynamics in swing')
+
+            else:
+
+                prog.AddConstraint(eq(qd[i+1,0], qd[i,0] + dt * qdd[i,0])).evaluator().set_description('stance euler integration z pos')
+                prog.AddConstraint(eq(qd[i+1,1], qd[i,1] + dt * qdd[i,1])).evaluator().set_description('stance euler integration z pos')
+
+                #prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i+1,:])).evaluator().set_description('stance full state euler integration pos')
+                #prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description('stance full state euler integration vel')
+
+                prog.AddConstraint(eq(q[i+1,2], q[i,2] + dt * qd[i+1,2])).evaluator().set_description('stance full state euler integration pos')
+                prog.AddConstraint(eq(qd[i+1,2], qd[i,2] + dt * qdd[i,2])).evaluator().set_description('stance full state euler integration vel')
+                
+                prog.AddConstraint(eq(q[i+1,3], q[i,3] + dt * qd[i+1,3])).evaluator().set_description('stance full state euler integration pos')
+                prog.AddConstraint(eq(qd[i+1,3], qd[i,3] + dt * qdd[i,3])).evaluator().set_description('stance full state euler integration vel')
+        
+                prog.AddConstraint(slip_model.kinematic_feasibility, lb =[0]*2,ub=[0]*2,vars=var).evaluator().set_description("kinematic eqn")
+                prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
+                prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
+        
+                prog.AddConstraint(slip_model.get_foot_z_position(q[i,:])==0).evaluator().set_description("grounded foot")
+                prog.AddLinearConstraint(q[i,2]>=0.5).evaluator().set_description("min stance height")
+                prog.AddConstraint(slip_model.stance_feasibility, lb=[0]*2,ub=[0]*2,vars=var).evaluator().set_description("stance eqn")
     # Contact Sequence Dependent Dynamics Constraints 
     """
     for i in range(number_of_collocation_points-1):
@@ -447,4 +481,4 @@ def create_trajectory(num_phases: int = 4):
         raise RuntimeError("Could not generate trajectory")
 
     slip_model.animate(pos)
-create_trajectory(1)
+create_trajectory(2)
