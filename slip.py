@@ -22,7 +22,7 @@ class SLIP_Model():
         self.min_leg_angle = -np.pi/3
         self.max_leg_angle = np.pi/3
 
-        self.collocation_nodes_per_contact = 50
+        self.collocation_nodes_per_contact = 40
 
     def stance_feasibility(self, vars):
         """
@@ -125,8 +125,11 @@ class SLIP_Model():
             2 * np.sin(theta) * l_d * theta_ddot -\
             np.cos(theta) * l_dd + self.g
 
-        xd_foot = qdot[0] + l * np.cos(theta) * theta_d + np.sin(theta) * l_d
+        xd_foot = qdot[0] - l * np.cos(theta) * theta_d - np.sin(theta) * l_d
         zd_foot = qdot[1] + l * np.sin(theta) * theta_d - np.cos(theta) * l_d
+        #a = x_d - np.sin(theta) * l_d - np.cos(theta) * theta_d * l
+
+        #return [a]
 
         #foot_x_pos = q[0] + np.sin(theta) * l
         #a = x_d - np.sin(theta) * l_d - np.cos(theta) * theta_d * l
@@ -136,7 +139,7 @@ class SLIP_Model():
         #b = np.sqrt(np.sum(q[:2] - [foot_x_pos, q[1] + np.cos(theta) * l])**2)
         #b = 0
         
-        return [xdd_foot, 0, 0, 0]
+        return [xd_foot, 0, 0, 0]
         
     def angle_matches_velocity(self, var):
         q = var[:4]
@@ -484,17 +487,17 @@ def create_stance_trajectory(slip_model, qd_i = None, exit_angle = None):
     for i in range(number_of_collocation_points):
         var = np.concatenate((q[i,:], qd[i,:], qdd[i,:], u[0,:]))
         prog.AddConstraint(slip_model.stance_feasibility, lb=[0]*2,ub=[0]*2,vars=var).evaluator().set_description("stance eqn")
-        prog.AddConstraint(slip_model.kinematic_feasibility, lb = [0]*4, ub = [0]*4, vars=var).evaluator().set_description("kinematic eqn")
+        #prog.AddConstraint(slip_model.kinematic_feasibility, lb = [0]*4, ub = [0]*4, vars=var).evaluator().set_description("kinematic eqn")
         #add_nonlinear_constraint(prog, slip_model.energy(q[i,:], qd[i,:], u[phase_num,:]) == slip_model.energy(q[i+1,:], qd[i+1,:], u[i+1,:]), f'energy constraint {i} ')
 
         if i < number_of_collocation_points - 1:
-            prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i+1,:])).evaluator().set_description(f'stance full state euler integration pos {i}')
-            prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i+1,:])).evaluator().set_description(f'stance full state euler integration vel {i}')
+            prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i,:])).evaluator().set_description(f'stance full state euler integration pos {i}')
+            prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description(f'stance full state euler integration vel {i}')
 
             add_linear_constraint(prog, q[i,2] <= slip_model.l_rest, f'stance leg length {i}')
 
             var = np.concatenate((q[i,:], q[i+1,:]))
-            prog.AddConstraint(slip_model.wtf, lb=[0], ub=[0], vars=var, description='foot cannot move')
+            #prog.AddConstraint(slip_model.wtf, lb=[0], ub=[0], vars=var, description='foot cannot move')
         #prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
         #prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
 
@@ -525,7 +528,7 @@ def create_stance_trajectory(slip_model, qd_i = None, exit_angle = None):
 
         print("Total constraints failed:", len(result.GetInfeasibleConstraintNames(prog)))
         slip_model.animate(pos)
-        raise RuntimeError("Could not generate trajectory")
+        #raise RuntimeError("Could not generate trajectory")
 
     print(pos[:,0])
     foot_acc = np.array([slip_model.kinematic_feasibility(np.hstack([pos[i], vel[i], accel[i], inputs])) for i in range(len(pos))])
@@ -565,7 +568,7 @@ def create_stance_trajectory(slip_model, qd_i = None, exit_angle = None):
     #plt.plot(inputs[:,1], label = 'input 1')
     #plt.legend()
     #plt.show()
-    slip_model.animate(pos)
+    #slip_model.animate(pos)
 
 if __name__ == '__main__':
     m = SLIP_Model()
