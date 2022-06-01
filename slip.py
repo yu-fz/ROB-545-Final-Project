@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 from pydrake.all import MathematicalProgram, eq, SnoptSolver
 from underactuated import running_as_notebook
 from underactuated.jupyter import AdvanceToAndVisualize
+import os
 
 class SLIP_Model():
     def __init__(self):
@@ -16,7 +17,7 @@ class SLIP_Model():
         self.m = 80 # point mass 
         self.g = 9.81
 
-        self.min_spring_const = 2000
+        self.min_spring_const = 500
         self.max_spring_const = 15000
 
         self.min_leg_angle = -np.pi/3
@@ -216,7 +217,7 @@ class SLIP_Model():
         U = self.m * self.g * q[2] * np.cos(q[3]) + u/2 * (self.l_rest - q[2])**2
         return T + U
 
-    def animate(self, q):
+    def animate(self, q, save_to=None):
         assert len(q.shape) == 2
         assert q.shape[-1] == 4
         
@@ -225,11 +226,11 @@ class SLIP_Model():
         fig, ax = plt.subplots()
         import matplotlib.animation as animation
 
-        ax.axis([-5,5,0,5])
+        ax.axis([-2,2,0,2])
         
-        base, = ax.plot(0, 1, marker="o")
-        foot, = ax.plot(0, 1, marker="o")
-        line, = ax.plot([], [], color="crimson", zorder=4)
+        base, = ax.plot(0, 1, marker="o", markersize=20)
+        foot, = ax.plot(0, 1, marker="o", markersize=10)
+        line, = ax.plot([], [], color="crimson", zorder=4, markersize=5)
 
         def update(t):
             t = int(t)
@@ -246,9 +247,13 @@ class SLIP_Model():
 
         ani = animation.FuncAnimation(fig, update, interval=30, blit=True, repeat=True,
                             frames=np.linspace(0, len(q), num=len(q), endpoint=False))
-        writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='Me'), bitrate=1800)
-        ani.save('traj.mp4', writer=writer)
-        plt.show()
+        if save_to is not None:
+            writer = animation.writers['ffmpeg'](fps=15, metadata=dict(artist='Me'), bitrate=1800)
+            ani.save(save_to, writer=writer)
+            print(save_to)
+            os.system(f'ffmpeg -i {save_to} -vf "fps=10,scale=320:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" -loop 0 "{save_to[:-4]}.gif"')
+        else:
+            plt.show()
 
 def add_linear_constraint(program, constraint, description):
     program.AddLinearConstraint(constraint).evaluator().set_description(description)
@@ -347,7 +352,11 @@ def create_swing_trajectory(
     add_bounding_box_constraint(prog, dt, dt_min, dt_max, 1, 'timestep bound')
 
     var = np.concatenate((q[0,:],qd[0,:]))
-    prog.AddConstraint(slip_model.angle_matches_velocity, lb=[0], ub=[0], vars=var).evaluator().set_description("angle match")
+    prog.AddConstraint(slip_model.angle_matches_velocity, lb=[-0.5], ub=[0.5], vars=var).evaluator().set_description("angle match")
+
+    var = np.concatenate((q[-1,:],qd[-1,:]))
+    #prog.AddConstraint(slip_model.angle_matches_velocity, lb=[-0.5], ub=[0.5], vars=var).evaluator().set_description("angle match")
+
 
     # Foot must touch ground at end of swing
     add_nonlinear_constraint(prog, slip_model.get_foot_z_position(q[0,:]) == 0, f'grounded foot {0}')
@@ -366,6 +375,9 @@ def create_swing_trajectory(
 
         #add_linear_constraint(prog, q[i,1] >= min_jump_height, f'min flight body height {i}')
         add_linear_constraint(prog, qdd[i,2] == 0, f'no leg dynamics in swing {i}')
+
+        var = np.concatenate((q[i,:],qd[i,:]))
+        #prog.AddConstraint(slip_model.angle_matches_velocity, lb=[-0.5], ub=[0.5], vars=var).evaluator().set_description("angle match")
 
         # Euler integration constraint
         if i < number_of_collocation_points - 1:
@@ -422,7 +434,7 @@ def create_stance_trajectory(
     #decide state accelerations
     qdd = prog.NewContinuousVariables(number_of_collocation_points, 4, 'qdd')
     #decide leg input torques
-    u = prog.NewContinuousVariables(number_of_collocation_points, 1, 'u') 
+    u = prog.NewContinuousVariables(1, 1, 'u') 
 
     # Initial position constraint
     if initial_x is not None:
@@ -430,6 +442,8 @@ def create_stance_trajectory(
 
     if initial_z is not None:
         add_linear_constraint(prog, q[0,1] == initial_z, 'z init')
+
+    prog.AddLinearConstraint(q[0,2] == slip_model.l_rest)
 
     if initial_theta is not None:
         add_linear_constraint(prog, q[0,3] == initial_theta, 'theta init')
@@ -449,16 +463,20 @@ def create_stance_trajectory(
 
     if initial_z_vel is not None:
         add_linear_constraint(prog, qd[0,1] == initial_z_vel, 'zd init')
+    else:
+        add_linear_constraint(prog, qd[0,1] <= 0, 'zd init')
 
     if final_x_vel is not None:
         add_linear_constraint(prog, qd[-1,0] == final_x_vel, 'xd final')
 
     if final_z_vel is not None:
         add_linear_constraint(prog, qd[-1,1] == final_z_vel, 'zd final')
+    else:
+        add_linear_constraint(prog, qd[-1,1] >= 0, 'zd final')
 
     #Actuator spring constant constraint
-    prog.AddBoundingBoxConstraint([slip_model.min_spring_const]*number_of_collocation_points, 
-                                  [slip_model.max_spring_const]*number_of_collocation_points,
+    prog.AddBoundingBoxConstraint([slip_model.min_spring_const]*1, 
+                                  [slip_model.max_spring_const]*1,
                                   u[:,0]
                                   ).evaluator().set_description('sprint constant constraint')
     #Actuator leg angle constraint 
@@ -484,12 +502,12 @@ def create_stance_trajectory(
             prog.AddConstraint(eq(q[i+1,:], q[i,:] + dt * qd[i,:])).evaluator().set_description('stance full state euler integration pos')
             prog.AddConstraint(eq(qd[i+1,:], qd[i,:] + dt * qdd[i,:])).evaluator().set_description('stance full state euler integration vel')
 
-        else:
-            prog.AddConstraint(qd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
-            prog.AddConstraint(qd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
-            prog.AddConstraint(qdd[i,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[2])
-            prog.AddConstraint(qdd[i,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[3])
-            prog.AddLinearConstraint(q[i,2] == slip_model.l_rest)
+        #if i == number_of_collocation_points - 1:
+    prog.AddConstraint(qd[-1,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[0])
+    prog.AddConstraint(qd[-1,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[1])
+    prog.AddConstraint(qdd[-1,0]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[2])
+    prog.AddConstraint(qdd[-1,1]==slip_model.relate_pelvis_accel_to_leg_accel(q[i,:],qd[i,:],qdd[i,:])[3])
+    prog.AddLinearConstraint(q[-1,2] == slip_model.l_rest)
        
     solver = SnoptSolver()
     result = solver.Solve(prog)
@@ -500,7 +518,9 @@ def create_stance_trajectory(
     inputs = result.GetSolution(u)
 
     if not result.is_success():
-        print(result.GetInfeasibleConstraintNames(prog))
+        #print(result.GetInfeasibleConstraintNames(prog))
+        print(inputs)
+        print(result.GetSolution(dt))
 
         raise RuntimeError("Could not generate trajectory")
 
@@ -513,31 +533,88 @@ if __name__ == '__main__':
     takeoff_angle = np.pi/2 - 1e-1
 
     # We want to reach some apex height
-    target_height = 3
+    target_height = 2
     takeoff_yvel = np.sqrt((target_height - m.l_rest) * 2 * m.g)
 
-    pos, vel = create_swing_trajectory(m, initial_z_vel=takeoff_yvel)
-    traj = pos
+    #pos, vel = create_stance_trajectory(m, final_x_vel=1, final_z_vel=5)
+    #m.animate(pos)
+    #successes = np.zeros((10,10))
+    #successes = np.zeros((10))
+    #for i, x in enumerate(np.linspace(-3.5, 3.5, num=10)):
+    #    #for j, z in enumerate(np.linspace(-1, -4, num=10)):
+    #            x_f = 1
+    #            try:
+    #                pos, vel = create_stance_trajectory(m, final_x_vel=x)#, final_z_vel=z)
+    #                successes[i][j] = 1
+    #                #print("success", x, z)
+    #                print('success', x)
+    #                #m.animate(pos)
+    #            except RuntimeError:
+    #                #print("fail", x, z)
+    #                print('fail', x)
+    #                pass
+    #print(successes)
 
-    # Use the initial conditions of the swing to create a stance trajectory
-    pos, vel = create_stance_trajectory(m, initial_x_vel=1, final_x_vel=vel[0][0], final_z_vel=vel[0][1])
-    pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
-    traj = np.vstack([pos, traj])
+    #exit(0)
+    #for x_i in [0, 1, 2]:
+    #    traj, vel = create_swing_trajectory(m, initial_x_vel=x_i, initial_z_vel=4)
+    #    m.animate(traj, save_to=f'swing{x_i}.mp4')
+    #    print("did ", x_i)
+    #exit(0)
 
-    # Use the initial conditions of THAT stance trajectory to create the preceding swing trajectory
-    pos, vel = create_swing_trajectory(m, final_theta=pos[0][3], final_x_vel=vel[0][0], final_z_vel=vel[0][1])
-    pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
-    traj = np.vstack([pos, traj])
+    if True:
+        # This always ends up doing bouncing with zero x velocity?
+        traj, vel = create_swing_trajectory(m, final_theta=-np.pi/6, initial_x_vel=3, initial_z_vel=2.5)
+        try:
+            print("touchdown vels:", vel[-1,:2])
+            pos, vel = create_stance_trajectory(m, initial_x_vel=vel[-1,0], initial_z_vel=vel[-1,1])
+            pos[:,0] = pos[:,0] + traj[-1,0]
+            traj = np.vstack([traj, pos])
+            pos, vel = create_swing_trajectory(m, initial_x_vel=vel[-1,0], initial_z_vel=vel[-1,1])
+            pos[:,0] = pos[:,0] + traj[-1,0]
+            traj = np.vstack([traj, pos])
+            pos, vel = create_stance_trajectory(m, initial_x_vel=vel[-1,0], initial_z_vel=vel[-1,1])
+            pos[:,0] = pos[:,0] + traj[-1,0]
+            traj = np.vstack([traj, pos])
+            pos, vel = create_swing_trajectory(m, initial_x_vel=vel[-1,0], initial_z_vel=vel[-1,1])
+            pos[:,0] = pos[:,0] + traj[-1,0]
+            traj = np.vstack([traj, pos])
+            pos, vel = create_stance_trajectory(m, initial_x_vel=vel[-1,0], initial_z_vel=vel[-1,1])
+            pos[:,0] = pos[:,0] + traj[-1,0]
+            traj = np.vstack([traj, pos])
+        except RuntimeError:
+            import traceback
+            traceback.print_exc()
+    if False: 
+        pos, vel = create_swing_trajectory(m, initial_x_vel=0, initial_z_vel=3)
+        traj = pos
 
-    # Use the initial conditions of the swing to create a stance trajectory
-    #pos, vel = create_stance_trajectory(m, final_x_vel=vel[0][0], final_z_vel=vel[0][1])
-    #pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
-    #traj = np.vstack([pos, traj])
+        try:
+            # Use the initial conditions of the swing to create a stance trajectory
+            print("z vel targets1: ", vel[0][:2])
+            pos, vel = create_stance_trajectory(m, initial_x_vel=1, final_x_vel=vel[0][0], final_z_vel=vel[0][1])
+            pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
+            traj = np.vstack([pos, traj])
 
-    # Use the initial conditions of THAT stance trajectory to create the preceding swing trajectory
-    #pos, vel = create_swing_trajectory(m, final_theta=pos[0][3], final_x_vel=vel[0][0], final_z_vel=vel[0][1])
-    #pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
-    #traj = np.vstack([pos, traj])
+            # Use the initial conditions of THAT stance trajectory to create the preceding swing trajectory
+            print("z vel targets2: ", vel[0][:2])
+            pos, vel = create_swing_trajectory(m, final_theta=pos[0][3], final_x_vel=vel[0][0], final_z_vel=vel[0][1])
+            pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
+            traj = np.vstack([pos, traj])
 
-    m.animate(traj)
+            # Use the initial conditions of the swing to create a stance trajectory
+            #print("z vel targets3: ", vel[0][:2])
+            #pos, vel = create_stance_trajectory(m, initial_x_vel=np.random.uniform(-1, 1), final_x_vel=vel[0][0], final_z_vel=vel[0][1])
+            #pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
+            #traj = np.vstack([pos, traj])
+
+            # Use the initial conditions of THAT stance trajectory to create the preceding swing trajectory
+            #pos, vel = create_swing_trajectory(m, final_theta=pos[0][3], final_x_vel=vel[0][0], final_z_vel=vel[0][1])
+            #pos[:,0] = pos[:,0] - pos[-1,0] + traj[0,0]
+            #traj = np.vstack([pos, traj])
+
+        except RuntimeError:
+            import traceback
+            traceback.print_exc()
+    m.animate(traj, save_to='enchilada2.mp4')
 
